@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.env
+.venv/
+venv/
+.pytest_cache/
+
+# Base de datos de ejemplo: se genera con `python -m scripts.seed_db`
+data/*.db
+
+# Salidas generadas localmente (no se versionan)
+runs/
+*.run.md
