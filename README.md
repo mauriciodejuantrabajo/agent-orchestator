@@ -1,203 +1,206 @@
+> **Idioma / Language:** **English** · [Español](README.es.md)
+
 # 🧭 Agent Orchestrator
 
-Un **supervisor** recibe tu petición, la **descompone en un plan** (un grafo de
-sub-tareas) y **delega** cada una al agente especializado que corresponde —
-investigación web, cálculo, datos SQL o redacción—, ejecutando **en paralelo**
-lo que puede y respetando las dependencias entre pasos.
+A **supervisor** receives your request, **breaks it down into a plan** (a graph of
+sub-tasks) and **delegates** each one to the corresponding specialized agent —web
+research, calculation, SQL data or writing—, running **in parallel** what it can
+and respecting the dependencies between steps.
 
-No es un pipeline fijo: el orquestador **decide en runtime** a quién rutear, junta
-los resultados y produce una respuesta unificada. Usa **tool-calling nativo** de
-la API de **DeepSeek**.
+It's not a fixed pipeline: the orchestrator **decides at runtime** who to route
+to, gathers the results and produces a unified answer. It uses **native
+tool-calling** from the **DeepSeek** API.
 
-Tiene una **interfaz web moderna** (React + shadcn/ui + Tailwind sobre un backend
-FastAPI, con el routing **en vivo** vía Server-Sent Events) y también **CLI**.
-
-```
-?  ¿Qué región vendió más unidades y cuánto facturó en total?
-
-  🧭 Plan del orquestador: s1:data → s2:writer
-
-  🗄️ data [s1] → averiguar región con más unidades y facturación total
-     herramientas: run_sql(query='SELECT r.name, SUM(s.units) ...')
-  ✍️ writer [s2] → redactar la respuesta final
-     herramientas: (sin herramientas)
-
-  Respuesta
-  La región **Centro** fue la que más unidades vendió (241), seguida por
-  Norte (208) y Sur (197). …
-```
-
-## El problema
-
-Un único agente con muchas herramientas (buscar, calcular, consultar la base,
-redactar) se confunde: elige mal la herramienta, mezcla responsabilidades y es
-difícil de mantener. Y resolver todo "de un saque" impide aprovechar que algunas
-sub-tareas son **independientes** y podrían correr a la vez.
-
-## La solución
-
-Separar **decisión** de **ejecución**, como un equipo con un líder:
-
-1. **El supervisor planifica.** Descompone la petición en un **DAG** de
-   sub-tareas: cada una dice *qué* agente la resuelve y *de qué* otras depende.
-2. **El orquestador ejecuta el DAG.** Corre en **paralelo** los pasos sin
-   dependencias entre sí, espera a los que dependen de otros y les pasa sus
-   resultados como contexto.
-3. **Un redactor unifica.** El `writer` sintetiza las salidas en la respuesta
-   final, conservando las citas `[N]` de la investigación.
-
-Cada agente tiene **una sola responsabilidad**, su propio prompt y un juego chico
-de herramientas: piensa solo en su tarea y elige bien.
-
-### Los agentes
-
-| Agente | Rol | Herramientas |
-|--------|-----|--------------|
-| 🔎 **research** | Busca y lee páginas; responde con hechos y citas `[N]` | `web_search`, `read_url` |
-| 🧮 **math** | Calcula de forma **exacta** (no "alucina" cuentas) | `calc` (parser aritmético seguro) |
-| 🗄️ **data** | Responde consultando una base de ejemplo | `run_sql` (**solo lectura**) |
-| ✍️ **writer** | Sintetiza los resultados en la respuesta final | — |
-
-> **Seguro a propósito.** La calculadora **no ejecuta código**: evalúa solo
-> expresiones aritméticas (`+ - * / // % **` y paréntesis) con un parser de AST,
-> rechazando variables, funciones o imports. El acceso a datos es **SQL de solo
-> lectura**: se bloquean `INSERT/UPDATE/DELETE/DROP/…` y la conexión se abre en
-> modo `read-only`, así que ni un descuido puede modificar la base.
-
-## Lo que lo hace un orquestador "de verdad"
-
-- 🗺️ **Planificación en DAG**, no `if/else`: el supervisor arma el grafo de
-  sub-tareas con sus dependencias.
-- ⚡ **Paralelismo real**: los pasos independientes se ejecutan a la vez (las
-  llamadas al LLM son I/O, así que baja el tiempo total).
-- 🔁 **Re-planificación ante fallos**: si un paso falla, se reintenta; si el plan
-  entero es inválido, hay un *fallback* para responder igual.
-- 💰 **Presupuesto**: tope global de pasos para no entrar en loops caros (el costo
-  es la preocupación #1 en producción).
-
-## Arquitectura
+It has a **modern web interface** (React + shadcn/ui + Tailwind over a FastAPI
+backend, with **live** routing via Server-Sent Events) and also a **CLI**.
 
 ```
-server.py             Backend HTTP (FastAPI): expone el orquestador y lo
-                      transmite EN VIVO por SSE (/api/stream).
-app.py                Interfaz web alternativa (Streamlit), sin npm.
-web/                  Frontend React + Vite + shadcn/ui + Tailwind.
-├── src/App.tsx        UI principal: input, plan, tarjetas por agente, respuesta.
-├── src/components/    StepCard + componentes de shadcn/ui.
-└── src/lib/           Cliente SSE (orchestrator.ts) y metadata de agentes.
+?  Which region sold the most units and how much did it bill in total?
+
+  🧭 Orchestrator plan: s1:data → s2:writer
+
+  🗄️ data [s1] → find the region with the most units and total billing
+     tools: run_sql(query='SELECT r.name, SUM(s.units) ...')
+  ✍️ writer [s2] → write the final answer
+     tools: (no tools)
+
+  Answer
+  The **Centro** region sold the most units (241), followed by
+  Norte (208) and Sur (197). …
+```
+
+## The problem
+
+A single agent with many tools (search, calculate, query the database, write)
+gets confused: it picks the wrong tool, mixes responsibilities and is hard to
+maintain. And solving everything "in one shot" prevents taking advantage of the
+fact that some sub-tasks are **independent** and could run at the same time.
+
+## The solution
+
+Separate **decision** from **execution**, like a team with a leader:
+
+1. **The supervisor plans.** It breaks the request into a **DAG** of sub-tasks:
+   each one says *which* agent solves it and *which* others it depends on.
+2. **The orchestrator executes the DAG.** It runs in **parallel** the steps with
+   no dependencies between them, waits for those that depend on others and passes
+   their results as context.
+3. **A writer unifies.** The `writer` synthesizes the outputs into the final
+   answer, preserving the `[N]` citations from the research.
+
+Each agent has **a single responsibility**, its own prompt and a small set of
+tools: it thinks only about its task and chooses well.
+
+### The agents
+
+| Agent | Role | Tools |
+|-------|------|-------|
+| 🔎 **research** | Searches and reads pages; answers with facts and `[N]` citations | `web_search`, `read_url` |
+| 🧮 **math** | Computes **exactly** (doesn't "hallucinate" arithmetic) | `calc` (safe arithmetic parser) |
+| 🗄️ **data** | Answers by querying a sample database | `run_sql` (**read-only**) |
+| ✍️ **writer** | Synthesizes the results into the final answer | — |
+
+> **Secure on purpose.** The calculator **runs no code**: it evaluates only
+> arithmetic expressions (`+ - * / // % **` and parentheses) with an AST parser,
+> rejecting variables, functions or imports. Data access is **read-only SQL**:
+> `INSERT/UPDATE/DELETE/DROP/…` are blocked and the connection is opened in
+> `read-only` mode, so not even a slip could modify the database.
+
+## What makes it a "real" orchestrator
+
+- 🗺️ **DAG planning**, not `if/else`: the supervisor builds the graph of sub-tasks
+  with their dependencies.
+- ⚡ **Real parallelism**: independent steps run at the same time (LLM calls are
+  I/O, so it lowers the total time).
+- 🔁 **Re-planning on failure**: if a step fails, it's retried; if the whole plan
+  is invalid, there's a *fallback* to answer anyway.
+- 💰 **Budget**: a global step cap to avoid expensive loops (cost is the #1 concern
+  in production).
+
+## Architecture
+
+```
+server.py             HTTP backend (FastAPI): exposes the orchestrator and
+                      streams it LIVE via SSE (/api/stream).
+app.py                Alternative web interface (Streamlit), no npm.
+web/                  React + Vite + shadcn/ui + Tailwind frontend.
+├── src/App.tsx        Main UI: input, plan, per-agent cards, answer.
+├── src/components/    StepCard + shadcn/ui components.
+└── src/lib/           SSE client (orchestrator.ts) and agent metadata.
 src/
-├── llm.py            Cliente DeepSeek (compatible OpenAI): tool-calling.
-├── tools.py          web_search, read_url, calc (AST seguro), run_sql (read-only).
-├── agents.py         Los 4 agentes: research, math, data, writer.
-├── planner.py        El supervisor: descompone la petición en un DAG (con validación).
-├── orchestrator.py   Ejecuta el DAG: dependencias, paralelismo, presupuesto, re-plan.
-└── main.py           CLI (rich) con traza viva del routing.
-scripts/seed_db.py    Genera data/demo.db (base de ventas de ejemplo).
-tests/                Tests con mocks (sin red real ni llamadas a la API).
+├── llm.py            DeepSeek client (OpenAI-compatible): tool-calling.
+├── tools.py          web_search, read_url, calc (safe AST), run_sql (read-only).
+├── agents.py         The 4 agents: research, math, data, writer.
+├── planner.py        The supervisor: breaks the request into a DAG (with validation).
+├── orchestrator.py   Executes the DAG: dependencies, parallelism, budget, re-plan.
+└── main.py           CLI (rich) with a live trace of the routing.
+scripts/seed_db.py    Generates data/demo.db (sample sales database).
+tests/                Tests with mocks (no real network, no API calls).
 ```
 
-El frontend (React) habla con el backend (FastAPI), que envuelve el orquestador
-(Python). El progreso del routing viaja del orquestador al navegador en tiempo
-real por **Server-Sent Events**:
+The frontend (React) talks to the backend (FastAPI), which wraps the orchestrator
+(Python). The routing progress travels from the orchestrator to the browser in
+real time via **Server-Sent Events**:
 
 ```
-  navegador (React/shadcn) ──HTTP──► FastAPI (server.py) ──► Orchestrator (src/)
+  browser (React/shadcn) ──HTTP──► FastAPI (server.py) ──► Orchestrator (src/)
         ▲                                                          │
-        └──────────────── SSE: plan, pasos, respuesta ◄───────────┘
+        └──────────────── SSE: plan, steps, answer ◄──────────────┘
 ```
 
-El **flujo** que coordina `orchestrator.py`:
+The **flow** coordinated by `orchestrator.py`:
 
 ```
-            petición
+            request
                │
                ▼
-        🧭 Planner ── descompone ──► DAG de sub-tareas
+        🧭 Planner ── breaks down ──► DAG of sub-tasks
                │
-        ┌──────┼───────────────┐   (paralelo donde no hay dependencia)
+        ┌──────┼───────────────┐   (parallel where there's no dependency)
         ▼      ▼               ▼
    🔎 research 🧮 math      🗄️ data
         └──────┴───────┬───────┘
-                       ▼   (espera dependencias, recibe sus salidas)
+                       ▼   (waits on dependencies, receives their outputs)
                   ✍️ writer
                        │
-        🧭 ¿completo? ── falla ──► reintenta / fallback
+        🧭 complete? ── fails ──► retry / fallback
                        │ ok
                        ▼
-              respuesta final + fuentes
+              final answer + sources
 ```
 
-## Requisitos
+## Requirements
 
 - **Python 3.10+**
-- **Node 18+** y **npm** (para la interfaz web React; la versión Streamlit no lo necesita)
-- Una **API key de DeepSeek** → https://platform.deepseek.com
+- **Node 18+** and **npm** (for the React web interface; the Streamlit version doesn't need it)
+- A **DeepSeek API key** → https://platform.deepseek.com
 
-## Instalación
+## Installation
 
 ```bash
-# 1. Clonar el repositorio
+# 1. Clone the repository
 git clone https://github.com/mauriciodejuantrabajo/agent-orchestrator.git
 cd agent-orchestrator
 
-# 2. (Opcional) entorno virtual
+# 2. (Optional) virtual environment
 python -m venv .venv
 # Windows:  .venv\Scripts\activate
 # Linux/Mac: source .venv/bin/activate
 
-# 3. Instalar dependencias
+# 3. Install dependencies
 pip install -r requirements.txt
 
-# 4. Generar la base de ejemplo (para el agente de datos)
+# 4. Generate the sample database (for the data agent)
 python -m scripts.seed_db
 
-# 5. Configurar la API key (ver siguiente sección)
+# 5. Configure the API key (see next section)
 ```
 
-## Configuración
+## Configuration
 
 ```bash
-cp .env.example .env       # en Windows: copy .env.example .env
+cp .env.example .env       # on Windows: copy .env.example .env
 ```
 
-Edita `.env` y coloca tu key de DeepSeek:
+Edit `.env` and set your DeepSeek key:
 
 ```env
-DEEPSEEK_API_KEY=sk-tu-key-real-aca
+DEEPSEEK_API_KEY=sk-your-real-key-here
 DEEPSEEK_MODEL=deepseek-v4-flash
 DEEPSEEK_BASE_URL=https://api.deepseek.com
 ```
 
-> 🔒 **`.env` está en `.gitignore` y nunca se sube.** El archivo versionado es
-> `.env.example`, que solo trae un placeholder (`sk-...`).
+> 🔒 **`.env` is in `.gitignore` and is never committed.** The versioned file is
+> `.env.example`, which only carries a placeholder (`sk-...`).
 
-## Uso
+## Usage
 
-### Interfaz web (React + shadcn — recomendada)
+### Web interface (React + shadcn — recommended)
 
-Necesitás **dos procesos**: el backend (FastAPI) y el frontend (Vite).
+You need **two processes**: the backend (FastAPI) and the frontend (Vite).
 
 ```bash
-# Terminal 1 — backend (en la raíz del repo)
+# Terminal 1 — backend (at the repo root)
 uvicorn server:app --reload --port 8000
 
 # Terminal 2 — frontend
 cd web
-npm install        # solo la primera vez
+npm install        # first time only
 npm run dev
 ```
 
-Abrí `http://localhost:5173`. Vite redirige `/api` al backend (puerto 8000), así
-que no hay que configurar nada más. Escribí tu petición y vas a ver, en vivo, el
-**plan** del orquestador y cómo cada agente trabaja en su **tarjeta** (con un
-indicador de estado), hasta la respuesta final en Markdown.
+Open `http://localhost:5173`. Vite proxies `/api` to the backend (port 8000), so
+nothing else needs configuring. Type your request and you'll see, live, the
+orchestrator's **plan** and how each agent works in its **card** (with a status
+indicator), down to the final answer in Markdown.
 
-> **Para producción** podés hacer `npm run build` (genera `web/dist`) y servir esos
-> estáticos detrás del mismo FastAPI; en desarrollo, el flujo de arriba es lo cómodo.
+> **For production** you can run `npm run build` (it generates `web/dist`) and
+> serve those static files behind the same FastAPI; in development, the flow above
+> is the comfortable one.
 
-### Interfaz web alternativa (Streamlit, sin npm)
+### Alternative web interface (Streamlit, no npm)
 
-Si no querés levantar Node, la versión Streamlit sigue disponible:
+If you don't want to spin up Node, the Streamlit version is still available:
 
 ```bash
 streamlit run app.py
@@ -206,24 +209,24 @@ streamlit run app.py
 ### CLI
 
 ```bash
-python -m src.main "¿Cuántas notebooks se vendieron y cuánto facturaron en total?"
-python -m src.main                                  # modo interactivo
-python -m src.main "tu petición" -o respuesta.md    # guarda la respuesta
+python -m src.main "How many laptops were sold and how much did they bill in total?"
+python -m src.main                                  # interactive mode
+python -m src.main "your request" -o answer.md      # saves the answer
 ```
 
-### Ideas para probar el routing
+### Ideas to test the routing
 
-- *"¿Qué región vendió más unidades?"* → solo **data**.
-- *"Suma 12, 30 y 8 y multiplícalo por 25."* → solo **math**.
-- *"Busca la población de Uruguay y de Paraguay y calcula la diferencia."* →
-  **research** (×2 en paralelo) → **math** → **writer**.
-- *"¿Qué es el Model Context Protocol y cuántas letras tiene su sigla?"* →
-  **research** + **math** → **writer**.
+- *"Which region sold the most units?"* → only **data**.
+- *"Add 12, 30 and 8 and multiply it by 25."* → only **math**.
+- *"Look up the population of Uruguay and Paraguay and compute the difference."* →
+  **research** (×2 in parallel) → **math** → **writer**.
+- *"What is the Model Context Protocol and how many letters does its acronym
+  have?"* → **research** + **math** → **writer**.
 
-## El modelo
+## The model
 
-Se usa la API de **DeepSeek** (formato compatible con OpenAI). El modelo es
-configurable en `.env` sin tocar código:
+It uses the **DeepSeek** API (OpenAI-compatible format). The model is configurable
+in `.env` without touching code:
 
 ```env
 DEEPSEEK_MODEL=deepseek-v4-flash
@@ -235,14 +238,14 @@ DEEPSEEK_MODEL=deepseek-v4-flash
 pytest
 ```
 
-Los tests reemplazan el LLM por uno falso (que hace de planner y de cada agente
-según el rol) y mockean las herramientas. Cubren: el parser seguro de `calc`, el
-bloqueo de escritura en `run_sql`, la **validación del DAG** (agentes válidos,
-dependencias existentes, sin ciclos) y el **flujo completo** del orquestador
-—incluido el paralelismo de pasos independientes y el *fallback* ante un plan
-inválido—. **No se hace ninguna llamada de red real**, así el CI es reproducible
-y no consume la cuota de API.
+The tests replace the LLM with a fake one (acting as the planner and each agent
+according to the role) and mock the tools. They cover: the safe `calc` parser,
+the write-blocking in `run_sql`, the **DAG validation** (valid agents, existing
+dependencies, no cycles) and the **full flow** of the orchestrator —including the
+parallelism of independent steps and the *fallback* on an invalid plan. **No real
+network call is made**, so the CI is reproducible and doesn't consume the API
+quota.
 
-## Licencia
+## License
 
 [MIT](LICENSE) © Mauricio De Juan
